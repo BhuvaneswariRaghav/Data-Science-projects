@@ -1,0 +1,173 @@
+To use it, you need to apply for the Google Cloud Platform API key and be sure to activate the Places API. 
+You need to enter your API key in before running. Choose whether you want to search with zipcode or directly through the state.
+
+pip install -U googlemaps
+pip install pandas
+pip install time
+pip install uszipcode
+
+import googlemaps
+import pandas as pd
+import time
+from uszipcode import SearchEngine
+
+# Define your API key
+API_KEY = 'Your API Key'
+
+state_abbreviations = {
+    'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
+    'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA',
+    'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS',
+    'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA',
+    'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MT',
+    'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM',
+    'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK',
+    'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD',
+    'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA',
+    'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY'
+}
+
+#Get zipcode and keep only the unique first three digits of the zip codes 
+def get_zipcodes(state):
+    search = SearchEngine()
+    zipcodes = []
+    unique_prefixes = set()
+    for zipcode in search.by_state(state, returns=100000):
+        prefix = zipcode.zipcode[:3]
+        if prefix not in unique_prefixes:
+            unique_prefixes.add(prefix)
+            zipcodes.append(zipcode.zipcode)
+    return zipcodes
+# If you don't keep these numbers and choose to search them all, you'll get a sky-high bill for API usage 
+
+
+# Get user input for the search method, state, and keywords
+search_method = input("Choose search method: (1) State or (2) Zip Codes: ")
+while search_method not in ['1', '2']:
+    search_method = input("Invalid input. Choose search method: (1) State or (2) Zip Codes: ")
+
+if search_method == '1':
+    state_name = input("Enter the name of the state (e.g., 'South Carolina'): ")
+    while state_name not in state_abbreviations:
+        state_name = input("Invalid state name. Enter the name of the state (e.g., 'South Carolina'): ")
+    search_zipcodes = get_zipcodes(state_name)
+else:
+    zip_codes_input = input("Enter the zip codes separated by commas (e.g., '10001, 10002'): ")
+    search_zipcodes = [zipcode.strip() for zipcode in zip_codes_input.split(',')]
+
+search_keywords = input("Enter the search keyword(s) separated by commas (e.g., 'self-storage, storage unit'): ")
+
+# Split the input keywords by commas and remove leading/trailing spaces
+search_keywords = [keyword.strip() for keyword in search_keywords.split(',')]
+
+
+# Initialize the Google Maps client
+gmaps = googlemaps.Client(key=API_KEY)
+
+# Define a function to retrieve the place details for a given place ID
+def get_place_details(place_id):
+    place_details = gmaps.place(place_id)['result']
+    name = place_details['name']
+    rating = place_details.get('rating')
+    num_reviews = place_details.get('user_ratings_total')
+    phone_number = place_details.get('formatted_phone_number')
+    website = place_details.get('website')
+    address = place_details.get('formatted_address')
+    hours = place_details.get('opening_hours')
+    if hours:
+        hours = hours['weekday_text']
+    else:
+        hours = None
+    maps_url = f"https://www.google.com/maps/place/?q=place_id:{place_id}"
+    return {
+        'name': name,
+        'rating': rating,
+        'num_reviews': num_reviews,
+        'phone_number': phone_number,
+        'website': website,
+        'address': address,
+        'hours': hours,
+        'maps_url': maps_url,
+    }
+
+# Define a function to search for places in a given zip code and keyword
+def search_places(zipcode, keyword):
+    places = []
+    # Use the text search API to retrieve a list of place IDs for the given zip code and keyword
+    search_results = gmaps.places(query=f'{keyword} {zipcode}', type='establishment')
+
+    while True:
+        for result in search_results['results']:
+            # Use the place details API to retrieve the details for each place
+            place_details = get_place_details(result['place_id'])
+            places.append(place_details)
+
+        # Check if there's a next_page_token and wait 2 seconds before making the next request
+        next_page_token = search_results.get('next_page_token')
+        if next_page_token:
+            time.sleep(2)
+            search_results = gmaps.places(query=f'{keyword} {zipcode}', type='establishment', page_token=next_page_token)
+        else:
+            break
+
+    return places
+
+# Initialize a set to keep track of unique place IDs
+unique_place_ids = set()
+
+# Search for places in each zip code and keyword
+results = []
+for zipcode in search_zipcodes:
+    for keyword in search_keywords:
+        places = search_places(zipcode, keyword)
+        for place in places:
+            # Check if the place ID is already in the set, if not, add it and append the place to the results
+            if place['maps_url'] not in unique_place_ids:
+                unique_place_ids.add(place['maps_url'])
+                results.append(place)
+
+# Convert the results to a pandas DataFrame
+df = pd.DataFrame(results)
+
+# Extract the state abbreviation and zip code from the address using regular expressions
+address_components = df['address'].str.extract(r',\s([A-Z]{2})\s(\d{5}),\sUSA')
+
+# Create new columns for the state and zip code in the DataFrame
+df['state'] = address_components[0]
+df['zipcode'] = address_components[1]
+
+# Remove the ', USA' part from the address
+df['address'] = df['address'].str.replace(', USA', '')
+
+# If the user chose to search by state, filter the results based on the selected state
+if search_method == '1':
+    state_abbreviation = state_abbreviations[state_name]
+    df = df[df['state'] == state_abbreviation]
+
+# Remove duplicates based on the 'state' column and keep the first occurrence
+df = df.drop_duplicates(subset='maps_url', keep='first')
+
+
+def get_state_by_zipcode(zipcode):
+    search = SearchEngine()
+    result = search.by_zipcode(zipcode)
+    if result:
+        return result.state
+    else:
+        return None
+    
+if search_method == '2':
+    state_name = get_state_by_zipcode(zipcode)
+
+# Export the DataFrame with all the results to an Excel file
+output_file = f"{'_'.join(search_keywords).replace(' ', '_')}_{state_name.replace(' ', '_')}_CS.xlsx"
+df.to_excel(output_file, index=False)
+
+# Filter the DataFrame to keep only rows with a rating of 15 and below
+df_filtered = df[df['num_reviews'] <= 15]
+
+# Export the filtered DataFrame to an Excel file
+output_file_filtered = f"{'_'.join(search_keywords).replace(' ', '_')}_{state_name.replace(' ', '_')}_CS_filtered.xlsx"
+df_filtered.to_excel(output_file_filtered, index=False)
+
+print(f"Results saved in {output_file}")
